@@ -2,6 +2,7 @@ import logging
 import lzma
 import pickle
 import sqlite3
+import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import NamedTuple, Optional, Union
@@ -36,6 +37,8 @@ DB_SCHEMA = """CREATE TABLE IF NOT EXISTS notebooks(
                         title TEXT,
                         notebook_guid TEXT,
                         is_active BOOLEAN,
+                        update_time INT DEFAULT 0,
+                        content_update_time INT DEFAULT 0,
                         raw_note BLOB
                     );
                     CREATE TABLE IF NOT EXISTS tasks(
@@ -199,6 +202,18 @@ class SqliteStorage:
                     """
                 )
 
+        if db_version < 7:
+            with self.db as con:
+                cur = con.execute("PRAGMA table_info(notes)")
+                columns = [row["name"] for row in cur.fetchall()]
+
+                if "update_time" not in columns:
+                    con.execute("ALTER TABLE notes ADD COLUMN update_time INT DEFAULT 0;")
+                if "content_update_time" not in columns:
+                    con.execute(
+                        "ALTER TABLE notes ADD COLUMN content_update_time INT DEFAULT 0;"
+                    )
+
         self.config.set_config_value("DB_VERSION", str(CURRENT_DB_VERSION))
 
         if need_resync:
@@ -324,8 +339,8 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         with self.db as con:
             con.executemany(
-                "replace into notes(guid, title, notebook_guid) values (?, ?, ?)",
-                ((n.guid, n.title, n.notebookGuid) for n in notes),
+                "replace into notes(guid, title, notebook_guid, update_time, content_update_time) values (?, ?, ?, ?, ?)",
+                ((n.guid, n.title, n.notebookGuid, n.updated, int(time.time() * 1000)) for n in notes),
             )
 
     def add_note(self, note: Note) -> None:
@@ -337,24 +352,33 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         with self.db as con:
             con.execute(
-                "replace into notes(guid, title, notebook_guid, is_active, raw_note)"
-                " values (?, ?, ?, ?, ?)",
+                "replace into notes(guid, title, notebook_guid, is_active, raw_note, update_time, content_update_time)"
+                " values (?, ?, ?, ?, ?, ?, ?)",
                 (
                     note.guid,
                     note.title,
                     note.notebookGuid,
                     note.active,
                     note_deflated,
+                    note.updated,
+                    int(time.time() * 1000),
                 ),
             )
 
         logger.debug(f"Added note [{note.guid}]")
 
-    def iter_notes(self, notebook_guid: str) -> Iterator[Note]:
-        for note_guid in self._get_notes_by_notebook(notebook_guid):
+    def iter_notes(
+        self,
+        notebook_guid: str,
+        after: Optional[int] = None,
+        after_content: Optional[int] = None,
+    ) -> Iterator[Note]:
+        for note_guid in self._get_notes_by_notebook(
+            notebook_guid, after=after, after_content=after_content
+        ):
             with self.db as con:
                 cur = con.execute(
-                    "select title, guid, raw_note"
+                    "select title, guid, raw_note, update_time, content_update_time"
                     " from notes"
                     " where guid=? and raw_note is not NULL",
                     (note_guid,),
@@ -366,25 +390,43 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["update_time"],
+                    row["content_update_time"],
                 )
 
                 if raw_note:
                     yield raw_note
 
-    def iter_notes_trash(self) -> Iterator[Note]:
+    def iter_notes_trash(
+        self, after: Optional[int] = None, after_content: Optional[int] = None
+    ) -> Iterator[Note]:
+        query = (
+            "select title, guid, raw_note, update_time, content_update_time"
+            " from notes"
+            " where is_active=0 and raw_note is not NULL"
+        )
+        params: list[Union[str, int]] = []
+
+        if after:
+            query += " and update_time > ?"
+            params.append(after)
+
+        if after_content:
+            query += " and content_update_time > ?"
+            params.append(after_content)
+
+        query += " order by title COLLATE NOCASE"
+
         with self.db as con:
-            cur = con.execute(
-                "select title, guid, raw_note"
-                " from notes"
-                " where is_active=0 and raw_note is not NULL"
-                " order by title COLLATE NOCASE",
-            )
+            cur = con.execute(query, params)
 
             for row in cur:
                 raw_note = self._get_raw_note(
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["update_time"],
+                    row["content_update_time"],
                 )
 
                 if raw_note:
@@ -393,7 +435,9 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def check_notes(self, mark_corrupt: bool) -> Iterator[Optional[Note]]:
         with self.db as con:
             cur = con.execute(
-                "select title, guid, raw_note from notes where raw_note is not NULL",
+                "select title, guid, raw_note, update_time, content_update_time"
+                " from notes"
+                " where raw_note is not NULL",
             )
 
             for row in cur:
@@ -401,16 +445,17 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["update_time"],
+                    row["content_update_time"],
                 )
 
                 if raw_note:
                     yield raw_note
-                else:
-                    if mark_corrupt:
-                        logger.info(
-                            f"Marking '{row['title']}' [{row['guid']}] note for re-download"
-                        )
-                        self._mark_note_for_redownload(row["guid"])
+                elif mark_corrupt:
+                    logger.info(
+                        f"Marking '{row['title']}' [{row['guid']}] note for re-download"
+                    )
+                    self._mark_note_for_redownload(row["guid"])
                     yield None
 
     def get_notes_for_sync(self) -> tuple[NoteForSync, ...]:
@@ -453,20 +498,35 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
             return int(cur.fetchone()[0])
 
-    def _get_notes_by_notebook(self, notebook_guid: str) -> list[str]:
+    def _get_notes_by_notebook(
+        self,
+        notebook_guid: str,
+        after: Optional[int] = None,
+        after_content: Optional[int] = None,
+    ) -> list[str]:
         """Due to wrong idx_notes index, SQLite creates a temporary table on
             from notes where notebook_guid=? and is_active=1
             order by title COLLATE NOCASE
         which may cause a memory leak. This method sorts notes alphabetically
         to prevent SQLite from creating a sort table."""
 
+        query = (
+            "select guid, title"
+            " from notes"
+            " where notebook_guid=? and is_active=1 and raw_note is not NULL"
+        )
+        params: list[Union[str, int]] = [notebook_guid]
+
+        if after:
+            query += " and update_time > ?"
+            params.append(after)
+
+        if after_content:
+            query += " and content_update_time > ?"
+            params.append(after_content)
+
         with self.db as con:
-            cur = con.execute(
-                "select guid, title"
-                " from notes"
-                " where notebook_guid=? and is_active=1 and raw_note is not NULL",
-                (notebook_guid,),
-            )
+            cur = con.execute(query, params)
 
             sorted_notes = sorted(cur, key=lambda x: x["title"])
 
@@ -477,6 +537,8 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
         note_title: str,
         note_guid: str,
         raw_note: bytes,
+        update_time: int,
+        content_update_time: int,
     ) -> Optional[Note]:
         try:
             return pickle.loads(lzma.decompress(raw_note))
@@ -491,8 +553,8 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def _mark_note_for_redownload(self, note_guid: str) -> None:
         with self.db as con:
             con.execute(
-                "update notes set raw_note=NULL, is_active=NULL where guid=?",
-                (note_guid,),
+                "update notes set raw_note=NULL, is_active=NULL, update_time=?, content_update_time=? where guid=?",
+                (int(time.time()), int(time.time()), note_guid),
             )
 
 

@@ -333,6 +333,16 @@ def sync(
     help="Export notes with specific tag(s). (Can be used multiple times)",
     multiple=True,
 )
+@click.option(
+    "--after",
+    type=str,
+    help="Export notes updated after a certain date (YYYY-MM-DD).",
+)
+@click.option(
+    "--after-content",
+    type=str,
+    help="Export notes with content updated after a certain date (YYYY-MM-DD).",
+)
 @click.argument(
     "output_path",
     required=True,
@@ -350,6 +360,8 @@ def export(
     notebooks: tuple[str],
     tags: tuple[str],
     output_path: Path,
+    after: Optional[str],
+    after_content: Optional[str],
 ) -> None:
     """Export all notes from local database into ENEX files."""
 
@@ -364,6 +376,8 @@ def export(
         notebooks=notebooks,
         tags=tags,
         output_path=output_path,
+        after=after,
+        after_content=after_content,
     )
 
 

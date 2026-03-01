@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from pathlib import Path
 from ssl import SSLError
 from typing import Optional
@@ -189,10 +190,31 @@ def export(
     notebooks: tuple[str],
     tags: tuple[str],
     output_path: Path,
+    after: Optional[str],
+    after_content: Optional[str],
 ) -> None:
     storage = get_storage(database)
 
     raise_on_old_database_version(storage)
+
+    after_ts = None
+    if after:
+        try:
+            after_dt = datetime.strptime(after, "%Y-%m-%d")
+            # Convert to milliseconds, as required by Evernote API note.updated field.
+            after_ts = int(after_dt.timestamp()) * 1000
+        except ValueError:
+            raise ProgramTerminatedError(f"Wrong date format for after: {after}")
+
+    after_content_ts = None
+    if after_content:
+        try:
+            after_content_dt = datetime.strptime(after_content, "%Y-%m-%d")
+            after_content_ts = int(after_content_dt.timestamp()) * 1000
+        except ValueError:
+            raise ProgramTerminatedError(
+                f"Wrong date format for after_content: {after_content}"
+            )
 
     exporter = NoteExporter(
         storage=storage,
@@ -205,6 +227,8 @@ def export(
         filter_notebooks=notebooks,
         filter_tags=tags,
         overwrite=overwrite,
+        after=after_ts,
+        after_content=after_content_ts,
     )
 
     try:
