@@ -34,8 +34,9 @@ class NoteExporter:
         overwrite: bool,
         filter_notebooks: tuple[str],
         filter_tags: tuple[str],
-        after: [int],
-        after_content: [int],
+        after_create: [int],
+        after_update: [int],
+        after_sync: [int],
     ) -> None:
         self.storage = storage
         self.safe_paths = SafePath(target_dir, overwrite)
@@ -47,8 +48,9 @@ class NoteExporter:
         self.add_metadata = add_metadata
         self.filter_notebooks = filter_notebooks
         self.filter_tags = filter_tags
-        self.after = after
-        self.after_content = after_content
+        self.after_create = after_create
+        self.after_update = after_update
+        self.after_sync = after_sync
 
     def export_notebooks(self) -> None:
         count_notes = self.storage.notes.get_notes_count()
@@ -112,7 +114,7 @@ class NoteExporter:
         parent_dir = [notebook.stack] if notebook.stack else []
 
         notes_source = self.storage.notes.iter_notes(
-            notebook.guid, after=self.after, after_content=self.after_content
+            notebook.guid, after_create=self.after_create, after_update=self.after_update, after_sync=self.after_sync
         )
 
         if self.filter_tags:
@@ -126,7 +128,7 @@ class NoteExporter:
 
     def _export_trash(self) -> None:
         notes_source = self.storage.notes.iter_notes_trash(
-            after=self.after, after_content=self.after_content
+            after_create=self.after_create, after_update=self.after_update, after_sync=self.after_sync
         )
 
         if self.filter_tags:

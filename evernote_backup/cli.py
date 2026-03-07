@@ -334,14 +334,19 @@ def sync(
     multiple=True,
 )
 @click.option(
-    "--after",
+    "--after-update",
     type=str,
-    help="Export notes updated after a certain date (YYYY-MM-DD).",
+    help="Export notes updated on Evernote after a certain date (YYYY-MM-DD).",
 )
 @click.option(
-    "--after-content",
+    "--after-create",
     type=str,
-    help="Export notes with content updated after a certain date (YYYY-MM-DD).",
+    help="Export notes created on Evernote after a certain date (YYYY-MM-DD).",
+)
+@click.option(
+    "--after-sync",
+    type=str,
+    help="Export notes with content synced after a certain date (YYYY-MM-DD).",
 )
 @click.argument(
     "output_path",
@@ -360,8 +365,9 @@ def export(
     notebooks: tuple[str],
     tags: tuple[str],
     output_path: Path,
-    after: Optional[str],
-    after_content: Optional[str],
+    after_create: Optional[str],
+    after_update: Optional[str],
+    after_sync: Optional[str],
 ) -> None:
     """Export all notes from local database into ENEX files."""
 
@@ -376,8 +382,9 @@ def export(
         notebooks=notebooks,
         tags=tags,
         output_path=output_path,
-        after=after,
-        after_content=after_content,
+        after_create=after_create,
+        after_update=after_update,
+        after_sync=after_sync,
     )
 
 

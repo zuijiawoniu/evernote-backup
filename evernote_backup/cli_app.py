@@ -190,30 +190,40 @@ def export(
     notebooks: tuple[str],
     tags: tuple[str],
     output_path: Path,
-    after: Optional[str],
-    after_content: Optional[str],
+    after_create: Optional[str],
+    after_update: Optional[str],
+    after_sync: Optional[str],
 ) -> None:
     storage = get_storage(database)
 
     raise_on_old_database_version(storage)
 
-    after_ts = None
-    if after:
+    after_create_ts = None
+    if after_create:
         try:
-            after_dt = datetime.strptime(after, "%Y-%m-%d")
-            # Convert to milliseconds, as required by Evernote API note.updated field.
-            after_ts = int(after_dt.timestamp()) * 1000
+            after_create_dt = datetime.strptime(after_create, "%Y-%m-%d")
+            # Convert to milliseconds, as required by Evernote API note.created field.
+            after_create_ts = int(after_create_dt.timestamp()) * 1000
         except ValueError:
-            raise ProgramTerminatedError(f"Wrong date format for after: {after}")
+            raise ProgramTerminatedError(f"Wrong date format for after-create: {after_create}")
 
-    after_content_ts = None
-    if after_content:
+    after_update_ts = None
+    if after_update:
         try:
-            after_content_dt = datetime.strptime(after_content, "%Y-%m-%d")
-            after_content_ts = int(after_content_dt.timestamp()) * 1000
+            after_update_dt = datetime.strptime(after_update, "%Y-%m-%d")
+            # Convert to milliseconds, as required by Evernote API note.updated field.
+            after_update_ts = int(after_update_dt.timestamp()) * 1000
+        except ValueError:
+            raise ProgramTerminatedError(f"Wrong date format for after-update: {after_update}")
+
+    after_sync_ts = None
+    if after_sync:
+        try:
+            after_sync_dt = datetime.strptime(after_sync, "%Y-%m-%d")
+            after_sync_ts = int(after_sync_dt.timestamp()) * 1000
         except ValueError:
             raise ProgramTerminatedError(
-                f"Wrong date format for after_content: {after_content}"
+                f"Wrong date format for after_sync: {after_sync}"
             )
 
     exporter = NoteExporter(
@@ -227,8 +237,9 @@ def export(
         filter_notebooks=notebooks,
         filter_tags=tags,
         overwrite=overwrite,
-        after=after_ts,
-        after_content=after_content_ts,
+        after_create=after_create_ts,
+        after_update=after_update_ts,
+        after_sync=after_sync_ts,
     )
 
     try:

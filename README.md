@@ -129,19 +129,23 @@ By default, **evernote-backup** will export notes by packing them into notebooks
 
 To also include **trashed** notes in export, use the `--include-trash` flag.
 
-You can also **filter notes** by their update time:
+You can also **filter notes** by their creation and update time:
 
-- Use the `--after YYYY-MM-DD` flag to export notes that were updated on the Evernote service after the specified date.
-- Use the `--after-content YYYY-MM-DD` flag to export notes whose content was synced to the local database after the specified date.
+- Use the `--after-create YYYY-MM-DD` flag to export notes that were created on the Evernote service after the specified date.
+- Use the `--after-update YYYY-MM-DD` flag to export notes that were updated on the Evernote service after the specified date.
+- Use the `--after-sync YYYY-MM-DD` flag to export notes whose content was synced to the local database after the specified date.
 
 For example:
 
 ```console
+# Export notes created in Evernote after February 28th, 2026
+$ evernote-backup export --single-notes --after-create 2026-02-28 output_dir/
+
 # Export notes updated in Evernote after March 1st, 2026
-$ evernote-backup export --single-notes --after 2026-03-01 output_dir/
+$ evernote-backup export --single-notes --after-update 2026-03-01 output_dir/
 
 # Export notes with content synced locally after March 2nd, 2026
-$ evernote-backup export --single-notes --after-content 2026-03-02 output_dir/
+$ evernote-backup export --single-notes --after-sync 2026-03-02 output_dir/
 ```
 
 Exporting is performed wholly offline, and does not require access to the Evernote Cloud API to convert the notes.

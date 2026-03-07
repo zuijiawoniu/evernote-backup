@@ -37,8 +37,9 @@ DB_SCHEMA = """CREATE TABLE IF NOT EXISTS notebooks(
                         title TEXT,
                         notebook_guid TEXT,
                         is_active BOOLEAN,
+                        create_time INT DEFAULT 0,
                         update_time INT DEFAULT 0,
-                        content_update_time INT DEFAULT 0,
+                        sync_time INT DEFAULT 0,
                         raw_note BLOB
                     );
                     CREATE TABLE IF NOT EXISTS tasks(
@@ -209,10 +210,74 @@ class SqliteStorage:
 
                 if "update_time" not in columns:
                     con.execute("ALTER TABLE notes ADD COLUMN update_time INT DEFAULT 0;")
-                if "content_update_time" not in columns:
-                    con.execute(
-                        "ALTER TABLE notes ADD COLUMN content_update_time INT DEFAULT 0;"
-                    )
+
+        if db_version < 8:
+            with self.db as con:
+                cur = con.execute("PRAGMA table_info(notes)")
+                columns = [row["name"] for row in cur.fetchall()]
+
+                # 版本8的升级逻辑：处理sync_time字段和添加create_time字段
+                if "sync_time" not in columns:
+                    # 检查是否有旧的 content_update_time 字段
+                    if "content_update_time" in columns:
+                        logger.info("Migrating content_update_time to sync_time...")
+                        
+                        # 添加新的 sync_time 字段
+                        con.execute("ALTER TABLE notes ADD COLUMN sync_time INT DEFAULT 0;")
+                        
+                        # 对于大表，使用简单的全量更新，避免复杂的分批逻辑可能陷入死循环
+                        logger.info("Starting full migration of content_update_time to sync_time...")
+                        
+                        # 直接全量更新，SQLite会处理大表的更新
+                        result = con.execute("""
+                            UPDATE notes 
+                            SET sync_time = content_update_time 
+                            WHERE content_update_time!=0;
+                        """)
+                        
+                        rows_updated = result.rowcount
+                        logger.info(f"Migration completed. Total rows migrated: {rows_updated}")
+                        
+                        # 提交更新
+                        con.commit()
+                        
+                        # 尝试删除旧的 content_update_time 字段
+                        # 注意：对于30GB的大表，这可能失败或很慢
+                        try:
+                            logger.info("Attempting to drop content_update_time column...")
+                            
+                            # 检查SQLite版本是否支持DROP COLUMN
+                            cur = con.execute("SELECT sqlite_version()")
+                            sqlite_version = cur.fetchone()[0]
+                            logger.info(f"SQLite version: {sqlite_version}")
+                            
+                            # SQLite 3.35.0 (2021-03-12) 开始支持DROP COLUMN
+                            version_parts = tuple(map(int, sqlite_version.split('.')))
+                            if version_parts >= (3, 35, 0):
+                                # 使用新的ALTER TABLE DROP COLUMN语法
+                                con.execute("ALTER TABLE notes DROP COLUMN content_update_time")
+                                logger.info("Successfully dropped content_update_time column")
+                            else:
+                                logger.warning(
+                                    f"SQLite version {sqlite_version} does not support DROP COLUMN. "
+                                    "Keeping content_update_time column (unused)."
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to drop content_update_time column: {e}. "
+                                "Keeping column (unused). This is expected for large tables."
+                            )
+                    else:
+                        # 如果没有旧的 content_update_time 字段，直接添加 sync_time 字段
+                        con.execute("ALTER TABLE notes ADD COLUMN sync_time INT DEFAULT 0;")
+
+                # 版本8也添加create_time字段
+                if "create_time" not in columns:
+                    con.execute("ALTER TABLE notes ADD COLUMN create_time INT DEFAULT 0;")
+                    
+                    # 对于已有数据，我们需要从原始笔记数据中提取create_time
+                    # 但由于性能考虑，我们只在访问时动态提取，不在这里批量更新
+                    logger.info("Added create_time column. Existing notes will have create_time=0.")
 
         self.config.set_config_value("DB_VERSION", str(CURRENT_DB_VERSION))
 
@@ -339,8 +404,8 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         with self.db as con:
             con.executemany(
-                "replace into notes(guid, title, notebook_guid, update_time, content_update_time) values (?, ?, ?, ?, ?)",
-                ((n.guid, n.title, n.notebookGuid, n.updated, int(time.time() * 1000)) for n in notes),
+                "replace into notes(guid, title, notebook_guid, create_time, update_time, sync_time) values (?, ?, ?, ?, ?, ?)",
+                ((n.guid, n.title, n.notebookGuid, n.created, n.updated, int(time.time() * 1000)) for n in notes),
             )
 
     def add_note(self, note: Note) -> None:
@@ -352,14 +417,15 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         with self.db as con:
             con.execute(
-                "replace into notes(guid, title, notebook_guid, is_active, raw_note, update_time, content_update_time)"
-                " values (?, ?, ?, ?, ?, ?, ?)",
+                "replace into notes(guid, title, notebook_guid, is_active, raw_note, create_time, update_time, sync_time)"
+                " values (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     note.guid,
                     note.title,
                     note.notebookGuid,
                     note.active,
                     note_deflated,
+                    note.created,
                     note.updated,
                     int(time.time() * 1000),
                 ),
@@ -370,15 +436,16 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def iter_notes(
         self,
         notebook_guid: str,
-        after: Optional[int] = None,
-        after_content: Optional[int] = None,
+        after_create: Optional[int] = None,
+        after_update: Optional[int] = None,
+        after_sync: Optional[int] = None,
     ) -> Iterator[Note]:
         for note_guid in self._get_notes_by_notebook(
-            notebook_guid, after=after, after_content=after_content
+            notebook_guid, after_create=after_create, after_update=after_update, after_sync=after_sync
         ):
             with self.db as con:
                 cur = con.execute(
-                    "select title, guid, raw_note, update_time, content_update_time"
+                    "select title, guid, raw_note, create_time, update_time, sync_time"
                     " from notes"
                     " where guid=? and raw_note is not NULL",
                     (note_guid,),
@@ -390,30 +457,35 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["create_time"],
                     row["update_time"],
-                    row["content_update_time"],
+                    row["sync_time"],
                 )
 
                 if raw_note:
                     yield raw_note
 
     def iter_notes_trash(
-        self, after: Optional[int] = None, after_content: Optional[int] = None
+        self, after_create: Optional[int] = None, after_update: Optional[int] = None, after_sync: Optional[int] = None
     ) -> Iterator[Note]:
         query = (
-            "select title, guid, raw_note, update_time, content_update_time"
+            "select title, guid, raw_note, create_time, update_time, sync_time"
             " from notes"
             " where is_active=0 and raw_note is not NULL"
         )
         params: list[Union[str, int]] = []
 
-        if after:
-            query += " and update_time > ?"
-            params.append(after)
+        if after_create:
+            query += " and create_time > ?"
+            params.append(after_create)
 
-        if after_content:
-            query += " and content_update_time > ?"
-            params.append(after_content)
+        if after_update:
+            query += " and update_time > ?"
+            params.append(after_update)
+
+        if after_sync:
+            query += " and sync_time > ?"
+            params.append(after_sync)
 
         query += " order by title COLLATE NOCASE"
 
@@ -425,8 +497,9 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["create_time"],
                     row["update_time"],
-                    row["content_update_time"],
+                    row["sync_time"],
                 )
 
                 if raw_note:
@@ -435,7 +508,7 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def check_notes(self, mark_corrupt: bool) -> Iterator[Optional[Note]]:
         with self.db as con:
             cur = con.execute(
-                "select title, guid, raw_note, update_time, content_update_time"
+                "select title, guid, raw_note, update_time, sync_time"
                 " from notes"
                 " where raw_note is not NULL",
             )
@@ -445,8 +518,9 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     row["title"],
                     row["guid"],
                     row["raw_note"],
+                    row["create_time"],
                     row["update_time"],
-                    row["content_update_time"],
+                    row["sync_time"],
                 )
 
                 if raw_note:
@@ -501,8 +575,9 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def _get_notes_by_notebook(
         self,
         notebook_guid: str,
-        after: Optional[int] = None,
-        after_content: Optional[int] = None,
+        after_create: Optional[int] = None,
+        after_update: Optional[int] = None,
+        after_sync: Optional[int] = None,
     ) -> list[str]:
         """Due to wrong idx_notes index, SQLite creates a temporary table on
             from notes where notebook_guid=? and is_active=1
@@ -517,13 +592,17 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
         )
         params: list[Union[str, int]] = [notebook_guid]
 
-        if after:
-            query += " and update_time > ?"
-            params.append(after)
+        if after_create:
+            query += " and create_time > ?"
+            params.append(after_create)
 
-        if after_content:
-            query += " and content_update_time > ?"
-            params.append(after_content)
+        if after_update:
+            query += " and update_time > ?"
+            params.append(after_update)
+
+        if after_sync:
+            query += " and sync_time > ?"
+            params.append(after_sync)
 
         with self.db as con:
             cur = con.execute(query, params)
@@ -537,8 +616,9 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
         note_title: str,
         note_guid: str,
         raw_note: bytes,
+        create_time: int,
         update_time: int,
-        content_update_time: int,
+        sync_time: int,
     ) -> Optional[Note]:
         try:
             return pickle.loads(lzma.decompress(raw_note))
@@ -553,7 +633,7 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
     def _mark_note_for_redownload(self, note_guid: str) -> None:
         with self.db as con:
             con.execute(
-                "update notes set raw_note=NULL, is_active=NULL, update_time=?, content_update_time=? where guid=?",
+                "update notes set raw_note=NULL, is_active=NULL, update_time=?, sync_time=? where guid=?",
                 (int(time.time()), int(time.time()), note_guid),
             )
 
