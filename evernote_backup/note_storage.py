@@ -9,9 +9,93 @@ from typing import NamedTuple, Optional, Union
 
 from evernote.edam.type.ttypes import LinkedNotebook, Note, Notebook
 
-from evernote_backup.config import CURRENT_DB_VERSION
+from evernote_backup.config import CURRENT_DB_VERSION, NOTE_CONTENT_KEYWORDS_MAP
 from evernote_backup.evernote_types import Reminder, Task
 from evernote_backup.log_util import log_format_note, log_format_notebook
+
+import json
+import re
+
+
+def parse_note_content(content: str) -> dict:
+    """从笔记内容中解析ext字段
+    
+    根据NOTE_CONTENT_KEYWORDS_MAP中定义的关键词，从笔记内容开头提取对应字段。
+    笔记内容可能是XML格式（ENML），需要先提取文本内容。
+    格式：关键词：内容
+    如果匹配多个则取第一个。
+    
+    Args:
+        content: 笔记的文本内容（可能是XML格式）
+        
+    Returns:
+        解析后的字段字典，key为ext字段名，value为提取的内容
+    """
+    if not content:
+        return {}
+    
+    # 从XML中提取文本内容
+    # 移除XML标签，保留文本
+    text_content = extract_text_from_xml(content)
+    
+    if not text_content:
+        return {}
+    
+    result = {}
+    
+    # 遍历所有关键词映射
+    for keyword, field_key in NOTE_CONTENT_KEYWORDS_MAP.items():
+        # 构建正则表达式：匹配 "关键词：内容" 或 "关键词: 内容"
+        # 支持中文冒号和英文冒号
+        pattern = rf'{re.escape(keyword)}[：:]\s*(.+?)(?=\n|$)'
+        
+        # 在内容开头查找（限制在前3000字符内，避免扫描整个长文档）
+        search_content = text_content[:3000]
+        matches = re.findall(pattern, search_content, re.MULTILINE)
+        
+        if matches:
+            # 取第一个匹配，去除首尾空白
+            value = matches[0].strip()
+            result[field_key] = value
+            print(f'Found {keyword}: {value}')
+    
+    return result
+
+
+def extract_text_from_xml(xml_content: str) -> str:
+    """从XML内容中提取纯文本
+    
+    处理Evernote的ENML格式，移除所有XML标签，保留文本内容。
+    同时处理CDATA部分。
+    
+    Args:
+        xml_content: XML格式的内容
+        
+    Returns:
+        提取的纯文本
+    """
+    if not xml_content:
+        return ""
+    
+    # 移除XML声明和DOCTYPE
+    content = re.sub(r'<\?xml[^?]*\?>', '', xml_content)
+    content = re.sub(r'<!DOCTYPE[^>]*>', '', content)
+    
+    # 移除CDATA标记，保留内容
+    content = re.sub(r'<!\[CDATA\[', '', content)
+    content = re.sub(r'\]\]>', '', content)
+    
+    # 移除所有XML标签，保留标签之间的文本
+    # 使用非贪婪匹配移除标签
+    content = re.sub(r'<[^>]+>', '\n', content)
+    
+    # 合并多个换行符为单个换行符
+    content = re.sub(r'\n+', '\n', content)
+    
+    # 移除多余的空白字符
+    content = re.sub(r'[ \t]+', ' ', content)
+    
+    return content.strip()
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +124,8 @@ DB_SCHEMA = """CREATE TABLE IF NOT EXISTS notebooks(
                         create_time INT DEFAULT 0,
                         update_time INT DEFAULT 0,
                         sync_time INT DEFAULT 0,
+                        tag TEXT,
+                        ext TEXT,
                         raw_note BLOB
                     );
                     CREATE TABLE IF NOT EXISTS tasks(
@@ -211,12 +297,10 @@ class SqliteStorage:
                 if "update_time" not in columns:
                     con.execute("ALTER TABLE notes ADD COLUMN update_time INT DEFAULT 0;")
 
-        if db_version < 8:
-            with self.db as con:
                 cur = con.execute("PRAGMA table_info(notes)")
                 columns = [row["name"] for row in cur.fetchall()]
 
-                # 版本8的升级逻辑：处理sync_time字段和添加create_time字段
+                # 版本7的升级逻辑：处理sync_time字段和添加create_time字段
                 if "sync_time" not in columns:
                     # 检查是否有旧的 content_update_time 字段
                     if "content_update_time" in columns:
@@ -271,13 +355,22 @@ class SqliteStorage:
                         # 如果没有旧的 content_update_time 字段，直接添加 sync_time 字段
                         con.execute("ALTER TABLE notes ADD COLUMN sync_time INT DEFAULT 0;")
 
-                # 版本8也添加create_time字段
+                # 版本7也添加create_time字段
                 if "create_time" not in columns:
                     con.execute("ALTER TABLE notes ADD COLUMN create_time INT DEFAULT 0;")
                     
                     # 对于已有数据，我们需要从原始笔记数据中提取create_time
                     # 但由于性能考虑，我们只在访问时动态提取，不在这里批量更新
                     logger.info("Added create_time column. Existing notes will have create_time=0.")
+
+                # 版本7添加tag和ext字段
+                if "tag" not in columns:
+                    con.execute("ALTER TABLE notes ADD COLUMN tag TEXT;")
+                    logger.info("Added tag column.")
+                
+                if "ext" not in columns:
+                    con.execute("ALTER TABLE notes ADD COLUMN ext TEXT;")
+                    logger.info("Added ext column for storing parsed content fields.")
 
         self.config.set_config_value("DB_VERSION", str(CURRENT_DB_VERSION))
 
@@ -404,8 +497,17 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         with self.db as con:
             con.executemany(
-                "replace into notes(guid, title, notebook_guid, create_time, update_time, sync_time) values (?, ?, ?, ?, ?, ?)",
-                ((n.guid, n.title, n.notebookGuid, n.created, n.updated, int(time.time() * 1000)) for n in notes),
+                "replace into notes(guid, title, notebook_guid, create_time, update_time, sync_time, tag, ext) values (?, ?, ?, ?, ?, ?, ?, ?)",
+                ((
+                    n.guid,
+                    n.title,
+                    n.notebookGuid,
+                    n.created,
+                    n.updated,
+                    int(time.time() * 1000),
+                    json.dumps(n.tagNames, ensure_ascii=False) if n.tagNames else None,
+                    json.dumps(parse_note_content(n.content), ensure_ascii=False) if n.content else None
+                ) for n in notes),
             )
 
     def add_note(self, note: Note) -> None:
@@ -415,10 +517,13 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
 
         note_deflated = lzma.compress(pickle.dumps(note))
 
+        # 解析笔记内容中的ext字段
+        ext_data = parse_note_content(note.content) if note.content else {}
+        
         with self.db as con:
             con.execute(
-                "replace into notes(guid, title, notebook_guid, is_active, raw_note, create_time, update_time, sync_time)"
-                " values (?, ?, ?, ?, ?, ?, ?, ?)",
+                "replace into notes(guid, title, notebook_guid, is_active, raw_note, create_time, update_time, sync_time, tag, ext)"
+                " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     note.guid,
                     note.title,
@@ -428,6 +533,8 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                     note.created,
                     note.updated,
                     int(time.time() * 1000),
+                    json.dumps(note.tagNames, ensure_ascii=False) if note.tagNames else None,
+                    json.dumps(ext_data, ensure_ascii=False) if ext_data else None,
                 ),
             )
 
