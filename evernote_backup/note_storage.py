@@ -57,7 +57,7 @@ def parse_note_content(content: str) -> dict:
             # 取第一个匹配，去除首尾空白
             value = matches[0].strip()
             result[field_key] = value
-            print(f'Found {keyword}: {value}')
+            logger.debug(f'Found {keyword}: {value}')
     
     return result
 
