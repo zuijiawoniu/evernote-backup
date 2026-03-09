@@ -1,9 +1,11 @@
+import functools
 import logging
 import logging.config
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from evernote.edam.type.ttypes import Note, Notebook
 
@@ -106,3 +108,80 @@ def get_time_txt(seconds: int) -> str:
         return time.strftime("%M:%S", time.gmtime(seconds))
 
     return time.strftime("0:%S", time.gmtime(seconds))
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration with appropriate units, never omitting decimal places.
+    
+    Converts seconds to larger units when appropriate:
+    - Over 60 seconds: use minutes
+    - Over 60 minutes: use hours  
+    - Over 24 hours: use days
+    - Over 30 days: use months
+    
+    Args:
+        seconds: Duration in seconds
+        
+    Returns:
+        Formatted string with appropriate unit
+    """
+    if seconds < 60:
+        return f"{seconds:.2f} seconds"
+    
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.2f} minutes"
+    
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.2f} hours"
+    
+    days = hours / 24
+    if days < 30:
+        return f"{days:.2f} days"
+    
+    months = days / 30
+    return f"{months:.2f} months"
+
+
+def log_operation_time(func: Callable) -> Callable:
+    """Decorator to log operation start time and completion time with duration.
+    
+    Args:
+        func: Function to wrap with timing
+        
+    Returns:
+        Wrapped function with timing logs
+    """
+    logger = logging.getLogger(__name__)
+    
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = datetime.now()
+        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Extract function name for logging
+        func_name = func.__name__
+        if hasattr(func, '__qualname__'):
+            func_name = func.__qualname__
+            
+        logger.info(f"Starting {func_name} at {start_time_str}")
+        
+        try:
+            result = func(*args, **kwargs)
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            duration_str = format_duration(duration)
+            
+            logger.info(f"Completed {func_name} in {duration_str}")
+            return result
+            
+        except Exception as e:
+            end_time = datetime.now()
+            duration = (end_time - start_time).total_seconds()
+            duration_str = format_duration(duration)
+            
+            logger.error(f"Failed {func_name} after {duration_str}: {e}")
+            raise
+    
+    return wrapper

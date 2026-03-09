@@ -7,6 +7,7 @@ from evernote_backup.cli_app_util import (
     DatabaseEmptyError,
     get_progress_output,
 )
+from evernote_backup.log_util import log_operation_time
 from evernote_backup.note_storage import SqliteStorage
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class NoteChecker:
         self.storage = storage
         self.mark_corrupt = mark_corrupt
 
+    @log_operation_time
     def check_notes(self) -> None:
         db_integrity_report = self.storage.integrity_check()
 

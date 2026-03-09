@@ -497,5 +497,29 @@ def manage_list(
     )
 
 
+opt_batch_size = click.option(
+    "--batch-size",
+    default=100,
+    show_default=True,
+    help="Number of notes to process in each batch.",
+)
+
+
+@manage.command("update-ext")
+@opt_database
+@opt_batch_size
+@handle_errors
+def manage_update_ext(
+    database: Path,
+    batch_size: int,
+) -> None:
+    """Update ext field by parsing raw_note content"""
+
+    cli_app.manage_update_ext(
+        database=database,
+        batch_size=batch_size,
+    )
+
+
 def main() -> None:
     cli()

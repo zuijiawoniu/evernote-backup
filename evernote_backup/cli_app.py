@@ -22,6 +22,7 @@ from evernote_backup.cli_app_util import (
 )
 from evernote_backup.config import CURRENT_DB_VERSION
 from evernote_backup.evernote_client_util_ssl import log_ssl_debug_info
+from evernote_backup.log_util import log_operation_time
 from evernote_backup.note_checker import NoteChecker
 from evernote_backup.note_exporter import NoteExporter
 from evernote_backup.note_lister import NoteLister
@@ -30,6 +31,7 @@ from evernote_backup.note_synchronizer import NoteSynchronizer, WrongAuthUserErr
 logger = logging.getLogger(__name__)
 
 
+@log_operation_time
 def init_db(
     database: Path,
     auth_user: Optional[str],
@@ -81,6 +83,7 @@ def init_db(
     logger.info(f"Successfully initialized database for {new_user}!")
 
 
+@log_operation_time
 def reauth(
     database: Path,
     auth_user: Optional[str],
@@ -132,6 +135,7 @@ def reauth(
     logger.info(f"Successfully refreshed auth token for {local_user}!")
 
 
+@log_operation_time
 def sync(
     database: Path,
     max_chunk_results: int,
@@ -179,6 +183,7 @@ def sync(
     logger.info("Synchronization completed!")
 
 
+@log_operation_time
 def export(
     database: Path,
     single_notes: bool,
@@ -253,6 +258,7 @@ def export(
     logger.info("All notes have been exported!")
 
 
+@log_operation_time
 def manage_ping(
     backend: str,
     network_retry_count: int,
@@ -284,6 +290,7 @@ def manage_ping(
     logger.debug(f"Version check status: {check_response}")
 
 
+@log_operation_time
 def manage_check(
     database: Path,
     mark_corrupted: bool,
@@ -310,6 +317,7 @@ def manage_check(
     logger.info("All notes have been checked!")
 
 
+@log_operation_time
 def manage_list(
     database: Path,
     notebook: Optional[str],
@@ -322,3 +330,22 @@ def manage_list(
     checker = NoteLister(storage, notebook, is_list_all)
 
     checker.list_notebooks()
+
+
+@log_operation_time
+def manage_update_ext(
+    database: Path,
+    batch_size: int,
+) -> None:
+    storage = get_storage(database)
+
+    raise_on_old_database_version(storage)
+
+    logger.info("Starting to update ext fields from raw_note content...")
+    
+    updated_count, failed_count = storage.notes.update_ext_from_raw_notes(batch_size=batch_size)
+    
+    logger.info(f"Update completed!")
+    logger.info(f"  Updated: {updated_count} notes")
+    if failed_count > 0:
+        logger.warning(f"  Failed: {failed_count} notes")

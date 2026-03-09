@@ -13,6 +13,7 @@ from evernote_backup.cli_app_util import chunks, get_progress_output
 from evernote_backup.evernote_client_sync import EvernoteClientSync
 from evernote_backup.evernote_client_util import NotebookAuth
 from evernote_backup.evernote_types import SyncChunkV2
+from evernote_backup.log_util import log_operation_time
 from evernote_backup.note_storage import NoteForSync, SqliteStorage
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,7 @@ class NoteSynchronizer:  # noqa: WPS214
         )
         self.linked_notebooks_auth: dict[str, NotebookAuth] = {}
 
+    @log_operation_time
     def sync(self) -> None:
         self._raise_on_wrong_user()
 

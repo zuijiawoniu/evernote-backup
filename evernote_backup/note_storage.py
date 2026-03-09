@@ -11,7 +11,7 @@ from evernote.edam.type.ttypes import LinkedNotebook, Note, Notebook
 
 from evernote_backup.config import CURRENT_DB_VERSION, NOTE_CONTENT_KEYWORDS_MAP
 from evernote_backup.evernote_types import Reminder, Task
-from evernote_backup.log_util import log_format_note, log_format_notebook
+from evernote_backup.log_util import log_format_note, log_format_notebook, log_operation_time
 
 import json
 import re
@@ -757,6 +757,97 @@ class NoteStorage(SqliteStorage):  # noqa: WPS214
                 "update notes set raw_note=NULL, is_active=NULL, update_time=?, sync_time=? where guid=?",
                 (int(time.time()), int(time.time()), note_guid),
             )
+
+    @log_operation_time
+    def update_ext_from_raw_notes(self, batch_size: int = 100) -> tuple[int, int]:
+        """从raw_note字段解析内容并更新ext字段
+        
+        分批遍历所有有raw_note的笔记，解析内容中的字段，更新ext字段。
+        分批处理可以避免内存溢出，适用于大数据量场景。
+        
+        Args:
+            batch_size: 每批处理的笔记数量，默认100条
+        
+        Returns:
+            (更新的笔记数量, 失败的笔记数量)
+        """
+        updated_count = 0
+        failed_count = 0
+        processed_count = 0
+        
+        logger.info(f"Starting to update ext from raw_notes with batch_size={batch_size}")
+        
+        with self.db as con:
+            # 首先获取总数量
+            cur = con.execute(
+                "SELECT COUNT(*) FROM notes WHERE raw_note IS NOT NULL"
+            )
+            total_count = cur.fetchone()[0]
+            logger.info(f"Total notes to process: {total_count}")
+            
+            if total_count == 0:
+                return 0, 0
+            
+            # 分批处理
+            offset = 0
+            while offset < total_count:
+                # 获取当前批次的数据
+                cur = con.execute(
+                    "SELECT guid, title, raw_note FROM notes WHERE raw_note IS NOT NULL LIMIT ? OFFSET ?",
+                    (batch_size, offset)
+                )
+                
+                rows = cur.fetchall()
+                if not rows:
+                    break
+                
+                batch_updated = 0
+                batch_failed = 0
+                
+                for row in rows:
+                    try:
+                        # 解析raw_note
+                        note = pickle.loads(lzma.decompress(row["raw_note"]))
+                        
+                        if not note or not note.content:
+                            processed_count += 1
+                            continue
+                        
+                        # 解析内容
+                        ext_data = parse_note_content(note.content)
+                        
+                        if ext_data:
+                            # 更新ext字段
+                            con.execute(
+                                "UPDATE notes SET ext = ? WHERE guid = ?",
+                                (json.dumps(ext_data, ensure_ascii=False), row["guid"])
+                            )
+                            updated_count += 1
+                            batch_updated += 1
+                            logger.debug(f"Updated ext for note '{row['title']}' [{row['guid']}]: {ext_data}")
+                        
+                        processed_count += 1
+                        
+                    except Exception as e:
+                        failed_count += 1
+                        batch_failed += 1
+                        processed_count += 1
+                        logger.warning(f"Failed to process note '{row['title']}' [{row['guid']}]: {e}")
+                        continue
+                
+                # 提交当前批次
+                con.commit()
+                
+                logger.info(
+                    f"Batch {offset // batch_size + 1}: "
+                    f"processed {len(rows)}, updated {batch_updated}, failed {batch_failed} "
+                    f"(total: {processed_count}/{total_count})"
+                )
+                
+                offset += batch_size
+        
+        logger.info(f"Completed: total processed {processed_count}, updated {updated_count}, failed {failed_count}")
+        return updated_count, failed_count
 
 
 class TasksStorage(SqliteStorage):  # noqa: WPS214

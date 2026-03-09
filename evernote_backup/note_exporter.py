@@ -8,7 +8,7 @@ from evernote.edam.type.ttypes import Note, Notebook
 
 from evernote_backup.cli_app_util import DatabaseEmptyError, get_progress_output
 from evernote_backup.evernote_types import Task
-from evernote_backup.log_util import log_format_note, log_format_notebook
+from evernote_backup.log_util import log_format_note, log_format_notebook, log_operation_time
 from evernote_backup.note_exporter_util import SafePath
 from evernote_backup.note_formatter import NoteFormatter
 from evernote_backup.note_storage import SqliteStorage
@@ -52,6 +52,7 @@ class NoteExporter:
         self.after_update = after_update
         self.after_sync = after_sync
 
+    @log_operation_time
     def export_notebooks(self) -> None:
         count_notes = self.storage.notes.get_notes_count()
         count_trash = self.storage.notes.get_notes_count(is_active=False)
