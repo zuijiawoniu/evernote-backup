@@ -43,21 +43,35 @@ def parse_note_content(content: str) -> dict:
     
     result = {}
     
+    # 在内容开头查找（限制在前3000字符内，避免扫描整个长文档）
+    search_content = text_content[:3000]
+    
+    # 按行分割内容
+    lines = search_content.split('\n')
+    
     # 遍历所有关键词映射
     for keyword, field_key in NOTE_CONTENT_KEYWORDS_MAP.items():
-        # 构建正则表达式：匹配 "关键词：内容" 或 "关键词: 内容"
-        # 支持中文冒号和英文冒号
-        pattern = rf'{re.escape(keyword)}[：:]\s*(.+?)(?=\n|$)'
-        
-        # 在内容开头查找（限制在前3000字符内，避免扫描整个长文档）
-        search_content = text_content[:3000]
-        matches = re.findall(pattern, search_content, re.MULTILINE)
-        
-        if matches:
-            # 取第一个匹配，去除首尾空白
-            value = matches[0].strip()
-            result[field_key] = value
-            logger.debug(f'Found {keyword}: {value}')
+        # 查找包含关键词的行
+        for i, line in enumerate(lines):
+            # 检查行是否以关键词开头
+            if re.match(rf'{re.escape(keyword)}[：:]\s*', line):
+                # 提取关键词后的内容（在同一行）
+                match = re.match(rf'{re.escape(keyword)}[：:]\s*(.*)', line)
+                if match:
+                    value = match.group(1).strip()
+                    
+                    # 如果当前行只有关键词没有内容，检查下一行
+                    if not value and i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        # 下一行不能是另一个关键词
+                        if next_line and not any(re.match(rf'{re.escape(k)}[：:]\s*', next_line) for k in NOTE_CONTENT_KEYWORDS_MAP.keys()):
+                            value = next_line
+                    
+                    # 只保存非空内容
+                    if value:
+                        result[field_key] = value
+                        logger.debug(f'Found {keyword}: {value}')
+                break
     
     return result
 
